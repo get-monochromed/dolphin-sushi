@@ -1,0 +1,445 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 319c551..1c8803c 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -509,6 +509,7 @@ if (HAVE_KUSERFEEDBACK)
+ endif()
+ 
+ add_executable(dolphin)
++set_target_properties(dolphin PROPERTIES OUTPUT_NAME dolphin-sushi)
+ 
+ target_sources(dolphin PRIVATE
+     dbusinterface.cpp
+diff --git a/src/dbusinterface.cpp b/src/dbusinterface.cpp
+index 1854449..95f848d 100644
+--- a/src/dbusinterface.cpp
++++ b/src/dbusinterface.cpp
+@@ -22,7 +22,7 @@ DBusInterface::DBusInterface()
+                                                  QDBusConnection::ExportScriptableContents | QDBusConnection::ExportAdaptors);
+     QDBusConnectionInterface *sessionInterface = QDBusConnection::sessionBus().interface();
+     if (sessionInterface) {
+-        sessionInterface->registerService(QStringLiteral("org.freedesktop.FileManager1"), QDBusConnectionInterface::QueueService);
++        sessionInterface->registerService(QStringLiteral("org.kde.dolphinsushi.FileManager1"), QDBusConnectionInterface::QueueService);
+     }
+ }
+ 
+@@ -32,7 +32,7 @@ void DBusInterface::ShowFolders(const QStringList &uriList, const QString &start
+     if (urls.isEmpty()) {
+         return;
+     }
+-    const auto serviceName = isDaemon() ? QString() : QStringLiteral("org.kde.dolphin-%1").arg(QCoreApplication::applicationPid());
++    const auto serviceName = isDaemon() ? QString() : QStringLiteral("org.kde.dolphinsushi-%1").arg(QCoreApplication::applicationPid());
+     if (!Dolphin::attachToExistingInstance(urls, false, GeneralSettings::splitView(), serviceName, startUpId)) {
+         Dolphin::openNewWindow(urls);
+     }
+@@ -44,7 +44,7 @@ void DBusInterface::ShowItems(const QStringList &uriList, const QString &startUp
+     if (urls.isEmpty()) {
+         return;
+     }
+-    const auto serviceName = isDaemon() ? QString() : QStringLiteral("org.kde.dolphin-%1").arg(QCoreApplication::applicationPid());
++    const auto serviceName = isDaemon() ? QString() : QStringLiteral("org.kde.dolphinsushi-%1").arg(QCoreApplication::applicationPid());
+     if (!Dolphin::attachToExistingInstance(urls, true, GeneralSettings::splitView(), serviceName, startUpId)) {
+         Dolphin::openNewWindow(urls, nullptr, Dolphin::OpenNewWindowFlag::Select);
+     };
+diff --git a/src/dolphinmainwindow.cpp b/src/dolphinmainwindow.cpp
+index c8e7e5f..9cad20f 100644
+--- a/src/dolphinmainwindow.cpp
++++ b/src/dolphinmainwindow.cpp
+@@ -754,7 +754,7 @@ void DolphinMainWindow::slotSaveSession()
+         m_sessionSaveScheduled = true;
+     } else if (!m_sessionSaveTimer->isActive()) {
+         // No point in saving the session if the timer is running (since it will save the session again when it times out).
+-        KConfigGui::setSessionConfig(QStringLiteral("dolphin"), QStringLiteral("dolphin"));
++        KConfigGui::setSessionConfig(QStringLiteral("dolphinsushi"), QStringLiteral("dolphinsushi"));
+         KConfig *config = KConfigGui::sessionConfig();
+         saveGlobalProperties(config);
+         savePropertiesInternal(config, 1);
+@@ -1975,7 +1975,28 @@ void DolphinMainWindow::setupActions()
+         "</para>"));
+     toggleSelectionModeAction->setIcon(QIcon::fromTheme(QStringLiteral("quickwizard")));
+     toggleSelectionModeAction->setCheckable(true);
+-    actionCollection()->setDefaultShortcut(toggleSelectionModeAction, Qt::Key_Space);
++    // Keep selection mode available in the menu; Space previews externally.
++    QAction *previewAction = actionCollection()->addAction(QStringLiteral("preview_with_sushi"));
++    previewAction->setText(i18nc("@action", "Preview with Sushi"));
++    previewAction->setIcon(QIcon::fromTheme(QStringLiteral("document-preview")));
++    previewAction->setAutoRepeat(false);
++    actionCollection()->setDefaultShortcut(previewAction, Qt::Key_Space);
++    connect(previewAction, &QAction::triggered, this, [this]() {
++        const DolphinView *view = m_activeViewContainer->view();
++        if (view->handleSpaceAsNormalKey()) {
++            return;
++        }
++        const KFileItemList items = view->selectedItems();
++        if (items.size() != 1 || !items.first().url().isLocalFile()) {
++            return;
++        }
++        // Argument-list launching handles spaces and shell metacharacters safely.
++        // KIO supplies the desktop activation token for Sushi's separate window.
++        auto *job = new KIO::CommandLauncherJob(QStringLiteral("sushi"),
++                                               QStringList{items.first().url().toString(QUrl::FullyEncoded)}, this);
++        job->setUiDelegate(new KDialogJobUiDelegate(KJobUiDelegate::AutoHandlingEnabled, this));
++        job->start();
++    });
+     connect(toggleSelectionModeAction, &QAction::triggered, this, &DolphinMainWindow::toggleSelectionMode);
+ 
+     // A special version of the toggleSelectionModeAction for the toolbar that also contains a menu
+diff --git a/src/dolphintabwidget.cpp b/src/dolphintabwidget.cpp
+index 7fbf10b..40e5d04 100644
+--- a/src/dolphintabwidget.cpp
++++ b/src/dolphintabwidget.cpp
+@@ -407,8 +407,8 @@ void DolphinTabWidget::detachTab(int index)
+     }
+     args << QStringLiteral("--new-window");
+ 
+-    KIO::CommandLauncherJob *job = new KIO::CommandLauncherJob("dolphin", args, this);
+-    job->setDesktopName(QStringLiteral("org.kde.dolphin"));
++    KIO::CommandLauncherJob *job = new KIO::CommandLauncherJob("dolphin-sushi", args, this);
++    job->setDesktopName(QStringLiteral("org.kde.dolphinsushi"));
+     job->start();
+ 
+     closeTab(index);
+diff --git a/src/global.cpp b/src/global.cpp
+index b325491..4a5b9f6 100644
+--- a/src/global.cpp
++++ b/src/global.cpp
+@@ -41,7 +41,7 @@ QUrl Dolphin::homeUrl()
+ 
+ void Dolphin::openNewWindow(const QList<QUrl> &urls, QWidget *window, const OpenNewWindowFlags &flags)
+ {
+-    QString command = QStringLiteral("dolphin --new-window");
++    QString command = QStringLiteral("dolphin-sushi --new-window");
+ 
+     if (flags.testFlag(OpenNewWindowFlag::Select)) {
+         command.append(QLatin1String(" --select"));
+@@ -143,7 +143,7 @@ QVector<QPair<QSharedPointer<OrgKdeDolphinMainWindowInterface>, QStringList>> Do
+     QVector<QPair<QSharedPointer<OrgKdeDolphinMainWindowInterface>, QStringList>> dolphinInterfaces;
+     if (!preferredService.isEmpty()) {
+         QSharedPointer<OrgKdeDolphinMainWindowInterface> preferredInterface(
+-            new OrgKdeDolphinMainWindowInterface(preferredService, QStringLiteral("/dolphin/Dolphin_1"), QDBusConnection::sessionBus()));
++            new OrgKdeDolphinMainWindowInterface(preferredService, QStringLiteral("/dolphinsushi/Dolphin_1"), QDBusConnection::sessionBus()));
+         if (preferredInterface->isValid() && !preferredInterface->lastError().isValid()) {
+             dolphinInterfaces.append(qMakePair(preferredInterface, QStringList()));
+         }
+@@ -153,14 +153,14 @@ QVector<QPair<QSharedPointer<OrgKdeDolphinMainWindowInterface>, QStringList>> Do
+     QDBusConnectionInterface *sessionInterface = QDBusConnection::sessionBus().interface();
+     const QStringList dbusServices = sessionInterface ? sessionInterface->registeredServiceNames().value() : QStringList();
+     // Don't match the service without trailing "-" (unique instance)
+-    const QString pattern = QStringLiteral("org.kde.dolphin-");
++    const QString pattern = QStringLiteral("org.kde.dolphinsushi-");
+     // Don't match the pid without leading "-"
+     const QString myPid = QLatin1Char('-') + QString::number(QCoreApplication::applicationPid());
+     for (const QString &service : dbusServices) {
+         if (service.startsWith(pattern) && !service.endsWith(myPid)) {
+             // Check if instance can handle our URLs
+             QSharedPointer<OrgKdeDolphinMainWindowInterface> interface(
+-                new OrgKdeDolphinMainWindowInterface(service, QStringLiteral("/dolphin/Dolphin_1"), QDBusConnection::sessionBus()));
++                new OrgKdeDolphinMainWindowInterface(service, QStringLiteral("/dolphinsushi/Dolphin_1"), QDBusConnection::sessionBus()));
+             if (interface->isValid() && !interface->lastError().isValid()) {
+                 auto isActiveWindowReply = interface->isActiveWindow();
+                 isActiveWindowReply.waitForFinished();
+diff --git a/src/main.cpp b/src/main.cpp
+index 3c89f98..453310b 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -92,8 +92,8 @@ int main(int argc, char **argv)
+ 
+     KLocalizedString::setApplicationDomain(dolphinTranslationDomain);
+ 
+-    KAboutData aboutData(QStringLiteral("dolphin"),
+-                         i18n("Dolphin"),
++    KAboutData aboutData(QStringLiteral("dolphinsushi"),
++                         i18n("Dolphin Sushi"),
+                          QStringLiteral(DOLPHIN_VERSION_STRING),
+                          i18nc("@title", "File Manager"),
+                          KAboutLicense::GPL,
+@@ -126,6 +126,7 @@ int main(int argc, char **argv)
+     aboutData.addAuthor(i18nc("@info:credit", "Max Blazejak"), i18nc("@info:credit", "Developer"), QStringLiteral("m43ksrocks@gmail.com"));
+     aboutData.addAuthor(i18nc("@info:credit", "Michael Austin"), i18nc("@info:credit", "Documentation"), QStringLiteral("tuxedup@users.sourceforge.net"));
+ 
++    aboutData.setDesktopFileName(QStringLiteral("org.kde.dolphinsushi"));
+     KAboutData::setApplicationData(aboutData);
+     KCrash::initialize();
+ 
+@@ -235,7 +236,7 @@ int main(int argc, char **argv)
+     DBusInterface interface;
+ 
+     if (!app.isSessionRestored()) {
+-        KConfigGui::setSessionConfig(QStringLiteral("dolphin"), QStringLiteral("dolphin"));
++        KConfigGui::setSessionConfig(QStringLiteral("dolphinsushi"), QStringLiteral("dolphinsushi"));
+     }
+ 
+     // Only restore session if:
+@@ -246,7 +247,7 @@ int main(int argc, char **argv)
+     // 3. There is a session available to restore
+     if (app.isSessionRestored() || GeneralSettings::rememberOpenedTabs()) {
+         // Get saved state data for the last-closed Dolphin instance
+-        const QString serviceName = QStringLiteral("org.kde.dolphin-%1").arg(QCoreApplication::applicationPid());
++        const QString serviceName = QStringLiteral("org.kde.dolphinsushi-%1").arg(QCoreApplication::applicationPid());
+         const auto instancesCount = Dolphin::dolphinGuiInstances(serviceName).size();
+         if (instancesCount == 1 || (app.isSessionRestored() && instancesCount > 0)) {
+             const QString className = KXmlGuiWindow::classNameOfToplevel(1);
+diff --git a/src/panels/folders/dolphin_folderspanelsettings.kcfg b/src/panels/folders/dolphin_folderspanelsettings.kcfg
+index d7d479f..b0c2290 100644
+--- a/src/panels/folders/dolphin_folderspanelsettings.kcfg
++++ b/src/panels/folders/dolphin_folderspanelsettings.kcfg
+@@ -4,7 +4,7 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="FoldersPanel">
+         <entry name="HiddenFilesShown" type="Bool">
+             <label>Hidden files shown</label>
+diff --git a/src/panels/information/dolphin_informationpanelsettings.kcfg b/src/panels/information/dolphin_informationpanelsettings.kcfg
+index 0f34e73..47a37a2 100644
+--- a/src/panels/information/dolphin_informationpanelsettings.kcfg
++++ b/src/panels/information/dolphin_informationpanelsettings.kcfg
+@@ -4,7 +4,7 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="InformationPanel">
+         <entry name="previewsShown" type="Bool">
+             <label>Previews shown</label>
+diff --git a/src/panels/places/dolphin_placespanelsettings.kcfg b/src/panels/places/dolphin_placespanelsettings.kcfg
+index 58f77a9..66a6077 100644
+--- a/src/panels/places/dolphin_placespanelsettings.kcfg
++++ b/src/panels/places/dolphin_placespanelsettings.kcfg
+@@ -5,7 +5,7 @@
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+     <include>kiconloader.h</include>
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="PlacesPanel">
+         <entry name="IconSize" type="Int">
+             <label>Size of icons in the Places Panel (-1 means "automatic")</label>
+diff --git a/src/search/dolphin_searchsettings.kcfg b/src/search/dolphin_searchsettings.kcfg
+index 59e6f58..ba91d7d 100644
+--- a/src/search/dolphin_searchsettings.kcfg
++++ b/src/search/dolphin_searchsettings.kcfg
+@@ -4,7 +4,7 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="Search">
+         <entry name="Location" type="String">
+             <label>Location</label>
+diff --git a/src/settings/dolphin_compactmodesettings.kcfg b/src/settings/dolphin_compactmodesettings.kcfg
+index 3eda1b3..ace6990 100644
+--- a/src/settings/dolphin_compactmodesettings.kcfg
++++ b/src/settings/dolphin_compactmodesettings.kcfg
+@@ -6,7 +6,7 @@
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+     <include>QFontDatabase</include>
+     <include>kiconloader.h</include>
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="CompactMode">
+         <entry name="UseSystemFont" type="Bool">
+             <label>Use system font</label>
+diff --git a/src/settings/dolphin_contentdisplaysettings.kcfg b/src/settings/dolphin_contentdisplaysettings.kcfg
+index 6e8f8e9..71b7cbe 100644
+--- a/src/settings/dolphin_contentdisplaysettings.kcfg
++++ b/src/settings/dolphin_contentdisplaysettings.kcfg
+@@ -4,7 +4,7 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="ContentDisplay">
+         <entry name="DirectorySizeMode" type="Enum">
+             <label>How we display the size of directories</label>
+diff --git a/src/settings/dolphin_contextmenusettings.kcfg b/src/settings/dolphin_contextmenusettings.kcfg
+index 6e45d9b..8bbdc86 100644
+--- a/src/settings/dolphin_contextmenusettings.kcfg
++++ b/src/settings/dolphin_contextmenusettings.kcfg
+@@ -4,7 +4,7 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="ContextMenu">
+         <entry name="ShowCopyMoveMenu" type="Bool">
+             <label>Show 'Copy To' and 'Move To' commands in context menu</label>
+diff --git a/src/settings/dolphin_detailsmodesettings.kcfg b/src/settings/dolphin_detailsmodesettings.kcfg
+index 52d85fa..4c8e7ed 100644
+--- a/src/settings/dolphin_detailsmodesettings.kcfg
++++ b/src/settings/dolphin_detailsmodesettings.kcfg
+@@ -6,7 +6,7 @@
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+     <include>kiconloader.h</include>
+     <include>QFontDatabase</include>
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="DetailsMode">
+         <entry name="ViewFont" type="Font">
+             <default code="true">QFont()</default>
+diff --git a/src/settings/dolphin_generalsettings.kcfg b/src/settings/dolphin_generalsettings.kcfg
+index b29526d..3b5cf81 100644
+--- a/src/settings/dolphin_generalsettings.kcfg
++++ b/src/settings/dolphin_generalsettings.kcfg
+@@ -7,7 +7,7 @@
+     <include>QDir</include>
+     <include>QUrl</include>
+     <include>KCompletion</include>
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <signal name="tabBarChanged" />
+     <signal name="sortingChoiceChanged" />
+     <signal name="splitViewChanged" />
+diff --git a/src/settings/dolphin_iconsmodesettings.kcfg b/src/settings/dolphin_iconsmodesettings.kcfg
+index 7948af7..f8e5c8d 100644
+--- a/src/settings/dolphin_iconsmodesettings.kcfg
++++ b/src/settings/dolphin_iconsmodesettings.kcfg
+@@ -6,7 +6,7 @@
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+     <include>QFontDatabase</include>
+     <include>kiconloader.h</include>
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="IconsMode">
+         <entry name="UseSystemFont" type="Bool">
+             <label>Use system font</label>
+diff --git a/src/settings/dolphin_versioncontrolsettings.kcfg b/src/settings/dolphin_versioncontrolsettings.kcfg
+index 89eb45b..99fe1f0 100644
+--- a/src/settings/dolphin_versioncontrolsettings.kcfg
++++ b/src/settings/dolphin_versioncontrolsettings.kcfg
+@@ -4,7 +4,7 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+-    <kcfgfile name="dolphinrc"/>
++    <kcfgfile name="dolphinsushirc"/>
+     <group name="VersionControl">
+         <entry name="enabledPlugins" type="StringList">
+             <label>Enabled plugins</label>
+diff --git a/src/settings/interface/folderstabssettingspage.cpp b/src/settings/interface/folderstabssettingspage.cpp
+index fa1b1b8..523e849 100644
+--- a/src/settings/interface/folderstabssettingspage.cpp
++++ b/src/settings/interface/folderstabssettingspage.cpp
+@@ -214,7 +214,7 @@ void FoldersTabsSettingsPage::applySettings()
+ 
+     // Remove saved state if "remember open tabs" has been turned off
+     if (!m_rememberOpenedTabsRadioButton->isChecked()) {
+-        KConfigGroup windowState{KSharedConfig::openConfig(QStringLiteral("dolphinrc")), QStringLiteral("WindowState")};
++        KConfigGroup windowState{KSharedConfig::openConfig(QStringLiteral("dolphinsushirc")), QStringLiteral("WindowState")};
+         if (windowState.exists()) {
+             windowState.deleteGroup();
+         }
+diff --git a/src/settings/viewpropertiesdialog.cpp b/src/settings/viewpropertiesdialog.cpp
+index c84fe64..f677fe3 100644
+--- a/src/settings/viewpropertiesdialog.cpp
++++ b/src/settings/viewpropertiesdialog.cpp
+@@ -209,7 +209,7 @@ ViewPropertiesDialog::ViewPropertiesDialog(DolphinView *dolphinView)
+     });
+ 
+     // clean up old window geometry settings
+-    KSharedConfig::openConfig(QStringLiteral("dolphinrc"))->deleteGroup(QStringLiteral("ViewPropertiesDialog"));
++    KSharedConfig::openConfig(QStringLiteral("dolphinsushirc"))->deleteGroup(QStringLiteral("ViewPropertiesDialog"));
+ 
+     loadSettings();
+ }
+diff --git a/src/tests/dolphinmainwindowtest.cpp b/src/tests/dolphinmainwindowtest.cpp
+index 8973c71..c5c7ca1 100644
+--- a/src/tests/dolphinmainwindowtest.cpp
++++ b/src/tests/dolphinmainwindowtest.cpp
+@@ -42,6 +42,8 @@
+ #include <QSignalSpy>
+ #include <QStandardPaths>
+ #include <QTest>
++#include <QTemporaryDir>
++#include <QLineEdit>
+ #include <QUrlQuery>
+ 
+ #include "testhelpers.h"
+@@ -88,6 +90,7 @@ private Q_SLOTS:
+     void testActivationAndTabTitleAfterRenameOpeningFolder();
+     void testActiveViewAfterTabSwitchWithSplitView();
+     void testActiveViewFollowsTheActivatedView();
++    void testSushiPreviewShortcut();
+     void cleanupTestCase();
+ 
+ private:
+@@ -1773,6 +1776,73 @@ void DolphinMainWindowTest::testActiveViewAfterTabSwitchWithSplitView()
+     QVERIFY(!firstTabPage->primaryViewContainer()->isActive());
+ }
+ 
++void DolphinMainWindowTest::testSushiPreviewShortcut()
++{
++    QTemporaryDir helperDir;
++    QVERIFY(helperDir.isValid());
++    const QString outputPath = helperDir.filePath(QStringLiteral("arguments"));
++    QFile launcher(helperDir.filePath(QStringLiteral("sushi")));
++    QVERIFY(launcher.open(QIODevice::WriteOnly));
++    launcher.write("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$DOLPHIN_SUSHI_TEST_LOG\"\n");
++    launcher.close();
++    QVERIFY(launcher.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
++    const QByteArray oldPath = qgetenv("PATH");
++    const QByteArray oldLog = qgetenv("DOLPHIN_SUSHI_TEST_LOG");
++    const auto restoreEnvironment = qScopeGuard([&]() {
++        qputenv("PATH", oldPath);
++        if (oldLog.isNull()) {
++            qunsetenv("DOLPHIN_SUSHI_TEST_LOG");
++        } else {
++            qputenv("DOLPHIN_SUSHI_TEST_LOG", oldLog);
++        }
++    });
++    QByteArray testPath = helperDir.path().toUtf8();
++    testPath.append(':').append(oldPath);
++    qputenv("PATH", testPath);
++    qputenv("DOLPHIN_SUSHI_TEST_LOG", outputPath.toUtf8());
++
++    TestDir files;
++    const QUrl fileUrl = QUrl::fromLocalFile(files.filePath(QStringLiteral("preview space ' $name.txt")));
++    const QUrl otherUrl = QUrl::fromLocalFile(files.filePath(QStringLiteral("other.txt")));
++    files.createFile(fileUrl.toLocalFile());
++    files.createFile(otherUrl.toLocalFile());
++    m_mainWindow->openDirectories({files.url()}, false);
++    m_mainWindow->show();
++    QVERIFY(QTest::qWaitForWindowExposed(m_mainWindow.data()));
++    auto *container = m_mainWindow->m_tabWidget->currentTabPage()->activeViewContainer();
++    DolphinView *view = container->view();
++    QTRY_COMPARE(view->itemsCount(), 2);
++    view->forceUrlsSelection(fileUrl, {fileUrl});
++    view->updateViewState();
++    view->setFocus();
++    QTRY_VERIFY(!view->handleSpaceAsNormalKey());
++    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Space);
++    QTRY_VERIFY(QFile::exists(outputPath));
++    QFile output(outputPath);
++    QVERIFY(output.open(QIODevice::ReadOnly));
++    QTRY_COMPARE(output.size(), fileUrl.toString(QUrl::FullyEncoded).toUtf8().size() + 1);
++    QCOMPARE(output.readAll(), fileUrl.toString(QUrl::FullyEncoded).toUtf8() + '\n');
++    QVERIFY(!container->isSelectionModeEnabled());
++
++    // Multiple selections must not launch a preview or enter selection mode.
++    const auto count = output.size();
++    view->forceUrlsSelection(fileUrl, {fileUrl, otherUrl});
++    view->updateViewState();
++    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Space);
++    QTest::qWait(150);
++    QCOMPARE(output.size(), count);
++    QVERIFY(!container->isSelectionModeEnabled());
++
++    // Space in an editor must remain text input.
++    QLineEdit editor(m_mainWindow.data());
++    editor.show();
++    editor.setFocus();
++    QTRY_VERIFY(editor.hasFocus());
++    QTest::keyClick(&editor, Qt::Key_Space);
++    QCOMPARE(editor.text(), QStringLiteral(" "));
++    QCOMPARE(output.size(), count);
++}
++
+ void DolphinMainWindowTest::cleanupTestCase()
+ {
+     m_mainWindow->showNormal();
